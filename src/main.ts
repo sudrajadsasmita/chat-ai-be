@@ -35,7 +35,7 @@ async function bootstrap() {
 
   app.useLogger(app.get(WINSTON_MODULE_NEST_PROVIDER));
   app.enableCors({
-    origin: ['http://localhost:3000'],
+    origin: ['http://127.0.0.1:3000'],
     methods: 'GET,HEAD,PUT,PATCH,POST,DELETE',
     credentials: true,
   });
