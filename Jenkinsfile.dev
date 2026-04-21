@@ -1,0 +1,146 @@
+pipeline {
+  agent any
+
+  environment {
+    DOCKER_IMAGE_NAME = '/diskominfo/e-sppd-service'
+    APPNAME = "stg-e-sppd-service"
+    TIMESTAMP = "${currentBuild.getTimeInMillis()}"
+    IMAGE_TAG = "${TIMESTAMP}-${BUILD_ID}"
+
+    REMOTE_PATH = '~/deploy-docker/stg-e-sppd-service'
+    SERVICE_NAME = 'stg-e-sppd-service'
+    SERVICE_ID = 'stg-e-sppd-service-1'
+    SERVICE_IP = '192.168.2.206'         
+    SERVICE_PORT = '8012'
+    DB_PORT = '10012'
+    SSH_USER = 'linux'                       
+    SSH_PORT = '5040'                       
+    SSH_KEY_PATH = '~/.ssh/id_rsa_jenkins'
+
+    GIT_TAG = sh(script: "git describe --tags --abbrev=0 || echo 'v0.0.0'", returnStdout: true).trim()
+    BUILD_TIME = sh(script: "date +%Y%m%d-%H%M", returnStdout: true).trim()
+  }
+
+  stages {
+    
+
+    stage('Checkout') {
+        steps {
+            checkout scm
+        }
+    }
+//     stage('Generate .env File') {
+//         steps {
+//             script {
+//             def imageTag = "${REGISTRY_URL}${DOCKER_IMAGE_NAME}:${GIT_TAG}"
+
+//              // Baca isi .env.example
+//             def envExample = readFile('.env.example')
+
+//             // Gabungkan isi .env.example + variabel build
+//             writeFile file: '.env', text: """
+// ${envExample}
+
+// APP_IMAGE=${imageTag}-dev
+// APP_NAME=${APPNAME}
+// SERVICE_PORT=${SERVICE_PORT}
+// DB_PORT=${DB_PORT}
+
+// """
+//             }
+//         }
+//     }
+
+    stage('Build Image') {
+        steps {
+            script {
+                def fullImageTag = "${REGISTRY_URL}${DOCKER_IMAGE_NAME}:${GIT_TAG}-dev"
+
+                echo "Building image: ${fullImageTag}"
+
+                sh """
+                    docker build -t ${fullImageTag} .
+                """
+            }
+        }
+    }
+
+    stage('Push Image') {
+        steps {
+            script {
+                def fullImageTag = "${REGISTRY_URL}${DOCKER_IMAGE_NAME}:${GIT_TAG}-dev"
+                sh """
+                    docker push ${fullImageTag}
+                """
+            }
+        }
+    }
+
+    // Kirim file tar dan docker-stack dari lokal repo Jenkins
+    stage('Copy Files to Server') {
+        steps {
+            script {
+                def imageTag = "${REGISTRY_URL}${DOCKER_IMAGE_NAME}:${GIT_TAG}"
+
+                sh """
+                echo "🔐 Set permission SSH key"
+                chmod 600 ${SSH_KEY_PATH}
+
+                echo "📁 Membuat folder tujuan di server jika belum ada..."
+                ssh -p ${SSH_PORT} -i ${SSH_KEY_PATH} -o StrictHostKeyChecking=no ${SSH_USER}@${SERVICE_IP} "mkdir -p ${REMOTE_PATH}"
+
+                echo "🔁 Update .env langsung di server..."
+                ssh -p ${SSH_PORT} -i ${SSH_KEY_PATH} -o StrictHostKeyChecking=no ${SSH_USER}@${SERVICE_IP} \\
+                "ENV_FILE=${REMOTE_PATH}/.env; \\
+                [ ! -f \\\$ENV_FILE ] && touch \\\$ENV_FILE; \\
+                grep -q '^APP_IMAGE=' \\\$ENV_FILE && sed -i 's|^APP_IMAGE=.*|APP_IMAGE=${imageTag}-dev|' \\\$ENV_FILE || echo 'APP_IMAGE=${imageTag}-dev' >> \\\$ENV_FILE; \\
+                grep -q '^APP_NAME=' \\\$ENV_FILE && sed -i 's|^APP_NAME=.*|APP_NAME=${APPNAME}|' \\\$ENV_FILE || echo 'APP_NAME=${APPNAME}' >> \\\$ENV_FILE; \\
+                grep -q '^SERVICE_PORT=' \\\$ENV_FILE && sed -i 's|^SERVICE_PORT=.*|SERVICE_PORT=${SERVICE_PORT}|' \\\$ENV_FILE || echo 'SERVICE_PORT=${SERVICE_PORT}' >> \\\$ENV_FILE; \\
+                grep -q '^DB_PORT=' \\\$ENV_FILE && sed -i 's|^DB_PORT=.*|DB_PORT=${DB_PORT}|' \\\$ENV_FILE || echo 'DB_PORT=${DB_PORT}' >> \\\$ENV_FILE"
+
+                echo "✅ Semua file berhasil dikirim ke server"
+                """
+            }
+        }
+    }
+    
+
+    stage('Deploy di Server Tujuan') {
+        steps {
+            sh """
+            ssh -p ${SSH_PORT} -i ${SSH_KEY_PATH} -o StrictHostKeyChecking=no ${SSH_USER}@${SERVICE_IP} '
+                set -e
+                cd ${REMOTE_PATH}
+                docker compose -f docker-compose.prod.yml down || true
+                docker compose -f docker-compose.prod.yml pull
+                docker compose -f docker-compose.prod.yml up -d
+            '
+            """
+        }
+    }
+
+  }
+
+  post {
+    always {
+        script {
+        def status = currentBuild.currentResult.toString()
+        def message
+
+        if (status == 'SUCCESS') {
+            echo "✅ Deploy ke ${SERVICE_IP}:${SSH_PORT} sukses!"
+            message = "Pipeline '${currentBuild.fullDisplayName}' has finished successfully Bro. :white_check_mark:"
+        } else {
+            echo "❌ Deploy ke ${SERVICE_IP}:${SSH_PORT} gagal!"
+            message = "Pipeline '${currentBuild.fullDisplayName}' has Failed Bro. :x:"
+        }
+
+        discordSend title: "Build And Push Docker Job $JOB_NAME",
+                    webhookURL: "$DISCORD_WEBHOOK",
+                    result: currentBuild.currentResult,
+                    description: message,
+                    footer: "${APPNAME}"
+        }
+    }
+  }
+}
